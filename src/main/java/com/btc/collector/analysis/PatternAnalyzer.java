@@ -38,8 +38,8 @@ public class PatternAnalyzer {
     // Minimum candles needed for indicator calculation
     private static final int LOOKBACK_CANDLES = 100;
 
-    // Batch size for DB inserts
-    private static final int BATCH_SIZE = 1000;
+    // Batch size for DB inserts (small for low memory)
+    private static final int BATCH_SIZE = 200;
 
     private final Candle15mRepository candleRepository;
     private final HistoricalPatternRepository patternRepository;
@@ -69,13 +69,12 @@ public class PatternAnalyzer {
         }
 
         try {
-            log.info("Building historical pattern dataset...");
+            log.info("Building historical pattern dataset (batch mode)...");
             long startTime = System.currentTimeMillis();
 
-            List<Candle15mEntity> allCandles = candleRepository.findAllOrderByOpenTimeAsc();
-
-            if (allCandles.size() < LOOKBACK_CANDLES + FUTURE_CANDLES) {
-                log.warn("Not enough candles to build patterns: {}", allCandles.size());
+            long totalCandles = candleRepository.count();
+            if (totalCandles < LOOKBACK_CANDLES + FUTURE_CANDLES) {
+                log.warn("Not enough candles to build patterns: {}", totalCandles);
                 return;
             }
 
@@ -83,89 +82,122 @@ public class PatternAnalyzer {
             log.info("Clearing existing patterns from database...");
             patternRepository.deleteAllPatterns();
 
-            int total = allCandles.size() - LOOKBACK_CANDLES - FUTURE_CANDLES;
-            List<HistoricalPattern> newPatterns = new ArrayList<>(total);
-            List<HistoricalPatternEntity> batchEntities = new ArrayList<>(BATCH_SIZE);
-            int built = 0;
-            int saved = 0;
-
-            // Start from LOOKBACK_CANDLES to have enough history
-            // End at size - FUTURE_CANDLES to have future data
-            for (int i = LOOKBACK_CANDLES; i < allCandles.size() - FUTURE_CANDLES; i++) {
-                // Get candles up to current point for indicator calculation
-                List<Candle15mEntity> historyCandles = allCandles.subList(
-                        Math.max(0, i - LOOKBACK_CANDLES), i + 1);
-
-                MarketSnapshot snapshot = indicatorEngine.calculate(historyCandles);
-                if (snapshot == null) continue;
-
-                Candle15mEntity currentCandle = allCandles.get(i);
-
-                // Get future candles for profit calculation
-                List<Candle15mEntity> futureCandles = allCandles.subList(i + 1, i + 1 + FUTURE_CANDLES);
-
-                BigDecimal entryPrice = currentCandle.getClosePrice();
-                BigDecimal maxPrice = entryPrice;
-                int hoursToMax = 0;
-
-                for (int j = 0; j < futureCandles.size(); j++) {
-                    BigDecimal highPrice = futureCandles.get(j).getHighPrice();
-                    if (highPrice.compareTo(maxPrice) > 0) {
-                        maxPrice = highPrice;
-                        hoursToMax = (j + 1) / 4; // Convert 15m candles to hours
-                    }
-                }
-
-                BigDecimal maxProfitPct = maxPrice.subtract(entryPrice)
-                        .divide(entryPrice, MC)
-                        .multiply(BigDecimal.valueOf(100))
-                        .setScale(SCALE, RoundingMode.HALF_UP);
-
-                // Generate strategy ID for this pattern
-                String strategyId = strategyTracker.generateStrategyId(snapshot);
-
-                HistoricalPattern pattern = HistoricalPattern.builder()
-                        .snapshot(snapshot)
-                        .maxProfitPct24h(maxProfitPct)
-                        .hoursToMax(hoursToMax)
-                        .build();
-
-                newPatterns.add(pattern);
-
-                // Create entity for DB
-                HistoricalPatternEntity entity = toEntity(currentCandle.getOpenTime(), snapshot, strategyId, maxProfitPct, hoursToMax);
-                batchEntities.add(entity);
-
-                built++;
-
-                // Batch save to DB
-                if (batchEntities.size() >= BATCH_SIZE) {
-                    patternRepository.saveAll(batchEntities);
-                    saved += batchEntities.size();
-                    batchEntities.clear();
-                    log.info("Progress: {}/{} patterns built, {} saved to DB", built, total, saved);
-                }
-            }
-
-            // Save remaining batch
-            if (!batchEntities.isEmpty()) {
-                patternRepository.saveAll(batchEntities);
-                saved += batchEntities.size();
-            }
-
-            // Replace patterns with write lock
+            // Clear in-memory cache
             patternsLock.writeLock().lock();
             try {
                 patterns.clear();
-                patterns.addAll(newPatterns);
             } finally {
                 patternsLock.writeLock().unlock();
             }
 
+            int built = 0;
+            int batchNum = 0;
+
+            // Get time boundaries
+            LocalDateTime minTime = candleRepository.findMinOpenTime().orElse(null);
+            LocalDateTime maxTime = candleRepository.findMaxOpenTime().orElse(null);
+
+            if (minTime == null || maxTime == null) {
+                log.warn("Cannot determine candle time range");
+                return;
+            }
+
+            // Start processing from minTime + LOOKBACK
+            LocalDateTime cursor = minTime.plusMinutes(LOOKBACK_CANDLES * 15L);
+            // End at maxTime - FUTURE_CANDLES
+            LocalDateTime endTime = maxTime.minusMinutes(FUTURE_CANDLES * 15L);
+
+            log.info("Building patterns from {} to {}", cursor, endTime);
+
+            while (cursor.isBefore(endTime) || cursor.isEqual(endTime)) {
+                batchNum++;
+
+                // Calculate batch end time
+                LocalDateTime batchEndTime = cursor.plusMinutes(BATCH_SIZE * 15L);
+                if (batchEndTime.isAfter(endTime)) {
+                    batchEndTime = endTime;
+                }
+
+                // Fetch candles needed for this batch (with lookback and future)
+                LocalDateTime fetchStart = cursor.minusMinutes(LOOKBACK_CANDLES * 15L);
+                LocalDateTime fetchEnd = batchEndTime.plusMinutes(FUTURE_CANDLES * 15L);
+
+                List<Candle15mEntity> batchCandles = candleRepository.findCandlesBetween(fetchStart, fetchEnd);
+
+                if (batchCandles.size() < LOOKBACK_CANDLES + FUTURE_CANDLES + 1) {
+                    cursor = batchEndTime.plusMinutes(15);
+                    continue;
+                }
+
+                // Build index for fast lookup
+                java.util.Map<LocalDateTime, Integer> candleIndex = new java.util.HashMap<>();
+                for (int i = 0; i < batchCandles.size(); i++) {
+                    candleIndex.put(batchCandles.get(i).getOpenTime(), i);
+                }
+
+                List<HistoricalPatternEntity> batchEntities = new ArrayList<>();
+
+                // Process candles in this batch
+                LocalDateTime processingTime = cursor;
+                while (!processingTime.isAfter(batchEndTime)) {
+                    Integer idx = candleIndex.get(processingTime);
+
+                    if (idx != null && idx >= LOOKBACK_CANDLES && idx + FUTURE_CANDLES < batchCandles.size()) {
+                        Candle15mEntity currentCandle = batchCandles.get(idx);
+
+                        List<Candle15mEntity> historyCandles = batchCandles.subList(idx - LOOKBACK_CANDLES, idx + 1);
+                        MarketSnapshot snapshot = indicatorEngine.calculate(historyCandles);
+
+                        if (snapshot != null) {
+                            List<Candle15mEntity> futureCandles = batchCandles.subList(idx + 1, idx + 1 + FUTURE_CANDLES);
+
+                            BigDecimal entryPrice = currentCandle.getClosePrice();
+                            BigDecimal maxPrice = entryPrice;
+                            int hoursToMax = 0;
+
+                            for (int j = 0; j < futureCandles.size(); j++) {
+                                BigDecimal highPrice = futureCandles.get(j).getHighPrice();
+                                if (highPrice.compareTo(maxPrice) > 0) {
+                                    maxPrice = highPrice;
+                                    hoursToMax = (j + 1) / 4;
+                                }
+                            }
+
+                            BigDecimal maxProfitPct = maxPrice.subtract(entryPrice)
+                                    .divide(entryPrice, MC)
+                                    .multiply(BigDecimal.valueOf(100))
+                                    .setScale(SCALE, RoundingMode.HALF_UP);
+
+                            String strategyId = strategyTracker.generateStrategyId(snapshot);
+                            HistoricalPatternEntity entity = toEntity(currentCandle.getOpenTime(), snapshot, strategyId, maxProfitPct, hoursToMax);
+                            batchEntities.add(entity);
+                            built++;
+                        }
+                    }
+
+                    processingTime = processingTime.plusMinutes(15);
+                }
+
+                // Save batch to DB
+                if (!batchEntities.isEmpty()) {
+                    patternRepository.saveAll(batchEntities);
+                    log.info("Batch {}: saved {} patterns (total: {})", batchNum, batchEntities.size(), built);
+                }
+
+                // Clear batch data and move cursor
+                batchCandles.clear();
+                batchEntities.clear();
+                System.gc();
+
+                cursor = batchEndTime.plusMinutes(15);
+            }
+
+            // Load patterns into memory cache from DB
+            loadPatternsFromDb();
+
             initialized.set(true);
             long duration = (System.currentTimeMillis() - startTime) / 1000;
-            log.info("Pattern dataset built: {} patterns in memory, {} saved to DB ({}s)",
-                    newPatterns.size(), saved, duration);
+            log.info("Pattern dataset built: {} patterns saved to DB ({}s)", built, duration);
 
         } catch (Exception e) {
             log.error("Error building pattern dataset: {}", e.getMessage(), e);
@@ -655,7 +687,7 @@ public class PatternAnalyzer {
 
     /**
      * Incremental build - only process candles that don't have patterns yet.
-     * Much faster than full rebuild when adding new data.
+     * Uses batch processing to avoid OutOfMemoryError.
      */
     @Transactional
     public void buildPatternsIncremental() {
@@ -665,92 +697,122 @@ public class PatternAnalyzer {
         }
 
         try {
-            log.info("Building patterns incrementally...");
+            log.info("Building patterns incrementally (batch mode)...");
             long startTime = System.currentTimeMillis();
 
-            // Find the latest candle time that has a pattern
+            // Find time boundaries
             LocalDateTime lastPatternTime = patternRepository.findMaxCandleTime().orElse(null);
+            LocalDateTime maxCandleTime = candleRepository.findMaxOpenTime().orElse(null);
+            LocalDateTime minCandleTime = candleRepository.findMinOpenTime().orElse(null);
 
-            List<Candle15mEntity> allCandles = candleRepository.findAllOrderByOpenTimeAsc();
-
-            if (allCandles.size() < LOOKBACK_CANDLES + FUTURE_CANDLES) {
-                log.warn("Not enough candles to build patterns: {}", allCandles.size());
+            if (maxCandleTime == null || minCandleTime == null) {
+                log.warn("No candles in database");
                 return;
             }
 
-            // Find starting index
-            int startIdx = LOOKBACK_CANDLES;
+            // Calculate start and end times
+            LocalDateTime cursor;
             if (lastPatternTime != null) {
-                for (int i = 0; i < allCandles.size(); i++) {
-                    if (allCandles.get(i).getOpenTime().isAfter(lastPatternTime)) {
-                        startIdx = Math.max(LOOKBACK_CANDLES, i);
-                        break;
-                    }
-                }
+                cursor = lastPatternTime.plusMinutes(15);
+            } else {
+                cursor = minCandleTime.plusMinutes(LOOKBACK_CANDLES * 15L);
             }
 
-            int endIdx = allCandles.size() - FUTURE_CANDLES;
-            if (startIdx >= endIdx) {
+            LocalDateTime endTime = maxCandleTime.minusMinutes(FUTURE_CANDLES * 15L);
+
+            if (!cursor.isBefore(endTime)) {
                 log.info("No new patterns to build (already up to date)");
                 loadPatternsFromDb();
                 return;
             }
 
-            int total = endIdx - startIdx;
-            List<HistoricalPatternEntity> batchEntities = new ArrayList<>(BATCH_SIZE);
+            log.info("Building patterns from {} to {}", cursor, endTime);
+
             int built = 0;
+            int batchNum = 0;
 
-            log.info("Building {} new patterns (from index {} to {})", total, startIdx, endIdx);
+            while (cursor.isBefore(endTime) || cursor.isEqual(endTime)) {
+                batchNum++;
 
-            for (int i = startIdx; i < endIdx; i++) {
-                Candle15mEntity currentCandle = allCandles.get(i);
+                LocalDateTime batchEndTime = cursor.plusMinutes(BATCH_SIZE * 15L);
+                if (batchEndTime.isAfter(endTime)) {
+                    batchEndTime = endTime;
+                }
 
-                // Skip if already exists
-                if (patternRepository.existsByCandleTime(currentCandle.getOpenTime())) {
+                // Fetch candles needed for this batch
+                LocalDateTime fetchStart = cursor.minusMinutes(LOOKBACK_CANDLES * 15L);
+                LocalDateTime fetchEnd = batchEndTime.plusMinutes(FUTURE_CANDLES * 15L);
+
+                List<Candle15mEntity> batchCandles = candleRepository.findCandlesBetween(fetchStart, fetchEnd);
+
+                if (batchCandles.size() < LOOKBACK_CANDLES + FUTURE_CANDLES + 1) {
+                    cursor = batchEndTime.plusMinutes(15);
                     continue;
                 }
 
-                List<Candle15mEntity> historyCandles = allCandles.subList(
-                        Math.max(0, i - LOOKBACK_CANDLES), i + 1);
+                // Build index for fast lookup
+                java.util.Map<LocalDateTime, Integer> candleIndex = new java.util.HashMap<>();
+                for (int i = 0; i < batchCandles.size(); i++) {
+                    candleIndex.put(batchCandles.get(i).getOpenTime(), i);
+                }
 
-                MarketSnapshot snapshot = indicatorEngine.calculate(historyCandles);
-                if (snapshot == null) continue;
+                List<HistoricalPatternEntity> batchEntities = new ArrayList<>();
 
-                List<Candle15mEntity> futureCandles = allCandles.subList(i + 1, i + 1 + FUTURE_CANDLES);
+                LocalDateTime processingTime = cursor;
+                while (!processingTime.isAfter(batchEndTime)) {
+                    // Skip if already exists
+                    if (!patternRepository.existsByCandleTime(processingTime)) {
+                        Integer idx = candleIndex.get(processingTime);
 
-                BigDecimal entryPrice = currentCandle.getClosePrice();
-                BigDecimal maxPrice = entryPrice;
-                int hoursToMax = 0;
+                        if (idx != null && idx >= LOOKBACK_CANDLES && idx + FUTURE_CANDLES < batchCandles.size()) {
+                            Candle15mEntity currentCandle = batchCandles.get(idx);
 
-                for (int j = 0; j < futureCandles.size(); j++) {
-                    BigDecimal highPrice = futureCandles.get(j).getHighPrice();
-                    if (highPrice.compareTo(maxPrice) > 0) {
-                        maxPrice = highPrice;
-                        hoursToMax = (j + 1) / 4;
+                            List<Candle15mEntity> historyCandles = batchCandles.subList(idx - LOOKBACK_CANDLES, idx + 1);
+                            MarketSnapshot snapshot = indicatorEngine.calculate(historyCandles);
+
+                            if (snapshot != null) {
+                                List<Candle15mEntity> futureCandles = batchCandles.subList(idx + 1, idx + 1 + FUTURE_CANDLES);
+
+                                BigDecimal entryPrice = currentCandle.getClosePrice();
+                                BigDecimal maxPrice = entryPrice;
+                                int hoursToMax = 0;
+
+                                for (int j = 0; j < futureCandles.size(); j++) {
+                                    BigDecimal highPrice = futureCandles.get(j).getHighPrice();
+                                    if (highPrice.compareTo(maxPrice) > 0) {
+                                        maxPrice = highPrice;
+                                        hoursToMax = (j + 1) / 4;
+                                    }
+                                }
+
+                                BigDecimal maxProfitPct = maxPrice.subtract(entryPrice)
+                                        .divide(entryPrice, MC)
+                                        .multiply(BigDecimal.valueOf(100))
+                                        .setScale(SCALE, RoundingMode.HALF_UP);
+
+                                String strategyId = strategyTracker.generateStrategyId(snapshot);
+                                HistoricalPatternEntity entity = toEntity(currentCandle.getOpenTime(), snapshot, strategyId, maxProfitPct, hoursToMax);
+                                batchEntities.add(entity);
+                                built++;
+                            }
+                        }
                     }
+
+                    processingTime = processingTime.plusMinutes(15);
                 }
 
-                BigDecimal maxProfitPct = maxPrice.subtract(entryPrice)
-                        .divide(entryPrice, MC)
-                        .multiply(BigDecimal.valueOf(100))
-                        .setScale(SCALE, RoundingMode.HALF_UP);
-
-                String strategyId = strategyTracker.generateStrategyId(snapshot);
-
-                HistoricalPatternEntity entity = toEntity(currentCandle.getOpenTime(), snapshot, strategyId, maxProfitPct, hoursToMax);
-                batchEntities.add(entity);
-                built++;
-
-                if (batchEntities.size() >= BATCH_SIZE) {
+                // Save batch
+                if (!batchEntities.isEmpty()) {
                     patternRepository.saveAll(batchEntities);
-                    batchEntities.clear();
-                    log.info("Progress: {} new patterns saved", built);
+                    log.info("Batch {}: saved {} patterns (total: {})", batchNum, batchEntities.size(), built);
                 }
-            }
 
-            // Save remaining batch
-            if (!batchEntities.isEmpty()) {
-                patternRepository.saveAll(batchEntities);
+                // Clear and move cursor
+                batchCandles.clear();
+                batchEntities.clear();
+                System.gc();
+
+                cursor = batchEndTime.plusMinutes(15);
             }
 
             // Reload cache
