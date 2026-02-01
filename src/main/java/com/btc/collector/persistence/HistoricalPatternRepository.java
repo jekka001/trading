@@ -96,4 +96,16 @@ public interface HistoricalPatternRepository extends JpaRepository<HistoricalPat
      */
     @Query("SELECT COUNT(p) FROM HistoricalPatternEntity p WHERE p.evaluated = true")
     long countEvaluated();
+
+    /**
+     * Find recent patterns with limit (for low memory).
+     */
+    @Query("SELECT p FROM HistoricalPatternEntity p WHERE p.candleTime >= :since AND p.evaluated = true ORDER BY p.candleTime DESC LIMIT :limit")
+    List<HistoricalPatternEntity> findRecentPatternsLimited(@Param("since") LocalDateTime since, @Param("limit") int limit);
+
+    /**
+     * Find patterns by strategy ID with limit (for low memory).
+     */
+    @Query("SELECT p FROM HistoricalPatternEntity p WHERE p.strategyId = :strategyId AND p.evaluated = true ORDER BY p.candleTime DESC LIMIT :limit")
+    List<HistoricalPatternEntity> findByStrategyIdLimited(@Param("strategyId") String strategyId, @Param("limit") int limit);
 }

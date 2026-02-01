@@ -50,6 +50,7 @@ public class PatternAnalyzer {
     @Value("${pattern.cache.days:30}")
     private int cacheDays;
 
+    // In-memory cache for fast pattern matching (loaded AFTER batch processing)
     private final List<HistoricalPattern> patterns = new ArrayList<>();
     private final ReentrantReadWriteLock patternsLock = new ReentrantReadWriteLock();
     private final AtomicBoolean initialized = new AtomicBoolean(false);
@@ -57,7 +58,7 @@ public class PatternAnalyzer {
 
     @PostConstruct
     public void init() {
-        // Try to load existing patterns from DB on startup
+        // Load patterns into memory on startup
         loadPatternsFromDb();
     }
 
@@ -81,14 +82,6 @@ public class PatternAnalyzer {
             // Clear existing patterns in DB
             log.info("Clearing existing patterns from database...");
             patternRepository.deleteAllPatterns();
-
-            // Clear in-memory cache
-            patternsLock.writeLock().lock();
-            try {
-                patterns.clear();
-            } finally {
-                patternsLock.writeLock().unlock();
-            }
 
             int built = 0;
             int batchNum = 0;
@@ -192,10 +185,13 @@ public class PatternAnalyzer {
                 cursor = batchEndTime.plusMinutes(15);
             }
 
-            // Load patterns into memory cache from DB
+            // Clear any remaining memory and force GC before loading cache
+            System.gc();
+            Thread.sleep(100); // Give GC time to run
+
+            // Now load last N days into memory cache
             loadPatternsFromDb();
 
-            initialized.set(true);
             long duration = (System.currentTimeMillis() - startTime) / 1000;
             log.info("Pattern dataset built: {} patterns saved to DB ({}s)", built, duration);
 
@@ -273,7 +269,7 @@ public class PatternAnalyzer {
             patternsLock.writeLock().lock();
             try {
                 patterns.add(pattern);
-                log.debug("Added new pattern, total: {} (saved to DB)", patterns.size());
+                log.debug("Added new pattern, total in cache: {}", patterns.size());
             } finally {
                 patternsLock.writeLock().unlock();
             }
@@ -285,7 +281,6 @@ public class PatternAnalyzer {
 
     /**
      * Returns immutable snapshot of patterns for thread-safe reading.
-     * Use this method instead of direct list access.
      */
     public List<HistoricalPattern> getPatternsSnapshot() {
         patternsLock.readLock().lock();
@@ -296,6 +291,20 @@ public class PatternAnalyzer {
         }
     }
 
+    /**
+     * Returns patterns for specific strategy from DB (for detailed analysis).
+     */
+    public List<HistoricalPattern> getPatternsForStrategy(String strategyId, int limit) {
+        List<HistoricalPatternEntity> entities = patternRepository.findByStrategyIdLimited(strategyId, limit);
+        List<HistoricalPattern> result = new ArrayList<>(entities.size());
+        for (HistoricalPatternEntity entity : entities) {
+            if (entity.isEvaluated() && entity.getMaxProfitPct() != null) {
+                result.add(toPattern(entity));
+            }
+        }
+        return result;
+    }
+
     public int getPatternCount() {
         patternsLock.readLock().lock();
         try {
@@ -303,6 +312,10 @@ public class PatternAnalyzer {
         } finally {
             patternsLock.readLock().unlock();
         }
+    }
+
+    public long getDbPatternCount() {
+        return patternRepository.countPatterns();
     }
 
     public boolean isInitialized() {
@@ -315,7 +328,7 @@ public class PatternAnalyzer {
 
     /**
      * Load patterns from database into memory cache.
-     * Called on startup and after rebuild.
+     * Only loads last N days (cacheDays) to save memory.
      */
     private void loadPatternsFromDb() {
         try {
@@ -325,21 +338,23 @@ public class PatternAnalyzer {
                 return;
             }
 
-            log.info("Loading {} patterns from database...", dbCount);
+            log.info("Loading patterns from database (last {} days)...", cacheDays);
             long startTime = System.currentTimeMillis();
 
-            // Load only EVALUATED patterns from last N days (they have outcome data)
+            // Load only EVALUATED patterns from last N days
             LocalDateTime since = LocalDateTime.now().minusDays(cacheDays);
             List<HistoricalPatternEntity> entities = patternRepository.findRecentPatterns(since);
 
             List<HistoricalPattern> loadedPatterns = new ArrayList<>(entities.size());
             for (HistoricalPatternEntity entity : entities) {
-                // Skip unevaluated patterns (no outcome data)
-                if (!entity.isEvaluated() || entity.getMaxProfitPct() == null || entity.getHoursToMax() == null) {
-                    continue;
+                if (entity.isEvaluated() && entity.getMaxProfitPct() != null && entity.getHoursToMax() != null) {
+                    loadedPatterns.add(toPattern(entity));
                 }
-                loadedPatterns.add(toPattern(entity));
             }
+
+            // Clear entity list to free memory before adding to cache
+            entities.clear();
+            entities = null;
 
             patternsLock.writeLock().lock();
             try {
@@ -351,8 +366,8 @@ public class PatternAnalyzer {
 
             initialized.set(true);
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Loaded {} patterns into memory (last {} days) in {}ms",
-                    loadedPatterns.size(), cacheDays, duration);
+            log.info("Loaded {} patterns into memory (last {} days, DB has {}) in {}ms",
+                    loadedPatterns.size(), cacheDays, dbCount, duration);
 
         } catch (Exception e) {
             log.error("Error loading patterns from database: {}", e.getMessage(), e);
@@ -399,13 +414,6 @@ public class PatternAnalyzer {
                 .evaluated(maxProfitPct != null)
                 .evaluatedAt(maxProfitPct != null ? LocalDateTime.now() : null)
                 .build();
-    }
-
-    /**
-     * Get count of patterns in database.
-     */
-    public long getDbPatternCount() {
-        return patternRepository.countPatterns();
     }
 
     /**
