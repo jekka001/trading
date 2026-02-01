@@ -41,6 +41,9 @@ public class PatternAnalyzer {
     // Batch size for DB inserts (small for low memory)
     private static final int BATCH_SIZE = 200;
 
+    // Flush checkpoint interval - clear memory every N batches
+    private static final int FLUSH_BATCH_INTERVAL = 200;
+
     private final Candle15mRepository candleRepository;
     private final HistoricalPatternRepository patternRepository;
     private final Indicator15mRepository indicatorRepository;
@@ -70,7 +73,8 @@ public class PatternAnalyzer {
         }
 
         try {
-            log.info("Building historical pattern dataset (batch mode)...");
+            log.info("Building historical pattern dataset (memory-safe mode)...");
+            log.info("[MEMORY] Flush checkpoint every {} batches", FLUSH_BATCH_INTERVAL);
             long startTime = System.currentTimeMillis();
 
             long totalCandles = candleRepository.count();
@@ -83,8 +87,9 @@ public class PatternAnalyzer {
             log.info("Clearing existing patterns from database...");
             patternRepository.deleteAllPatterns();
 
-            int built = 0;
+            int totalBuilt = 0;
             int batchNum = 0;
+            int batchesSinceFlush = 0;
 
             // Get time boundaries
             LocalDateTime minTime = candleRepository.findMinOpenTime().orElse(null);
@@ -102,8 +107,14 @@ public class PatternAnalyzer {
 
             log.info("Building patterns from {} to {}", cursor, endTime);
 
+            // Reusable collections (will be cleared at checkpoints)
+            List<Candle15mEntity> batchCandles = null;
+            java.util.Map<LocalDateTime, Integer> candleIndex = null;
+            List<HistoricalPatternEntity> batchEntities = new ArrayList<>(BATCH_SIZE);
+
             while (cursor.isBefore(endTime) || cursor.isEqual(endTime)) {
                 batchNum++;
+                batchesSinceFlush++;
 
                 // Calculate batch end time
                 LocalDateTime batchEndTime = cursor.plusMinutes(BATCH_SIZE * 15L);
@@ -115,20 +126,20 @@ public class PatternAnalyzer {
                 LocalDateTime fetchStart = cursor.minusMinutes(LOOKBACK_CANDLES * 15L);
                 LocalDateTime fetchEnd = batchEndTime.plusMinutes(FUTURE_CANDLES * 15L);
 
-                List<Candle15mEntity> batchCandles = candleRepository.findCandlesBetween(fetchStart, fetchEnd);
+                batchCandles = candleRepository.findCandlesBetween(fetchStart, fetchEnd);
 
                 if (batchCandles.size() < LOOKBACK_CANDLES + FUTURE_CANDLES + 1) {
+                    batchCandles.clear();
+                    batchCandles = null;
                     cursor = batchEndTime.plusMinutes(15);
                     continue;
                 }
 
                 // Build index for fast lookup
-                java.util.Map<LocalDateTime, Integer> candleIndex = new java.util.HashMap<>();
+                candleIndex = new java.util.HashMap<>(batchCandles.size());
                 for (int i = 0; i < batchCandles.size(); i++) {
                     candleIndex.put(batchCandles.get(i).getOpenTime(), i);
                 }
-
-                List<HistoricalPatternEntity> batchEntities = new ArrayList<>();
 
                 // Process candles in this batch
                 LocalDateTime processingTime = cursor;
@@ -164,7 +175,7 @@ public class PatternAnalyzer {
                             String strategyId = strategyTracker.generateStrategyId(snapshot);
                             HistoricalPatternEntity entity = toEntity(currentCandle.getOpenTime(), snapshot, strategyId, maxProfitPct, hoursToMax);
                             batchEntities.add(entity);
-                            built++;
+                            totalBuilt++;
                         }
                     }
 
@@ -174,26 +185,55 @@ public class PatternAnalyzer {
                 // Save batch to DB
                 if (!batchEntities.isEmpty()) {
                     patternRepository.saveAll(batchEntities);
-                    log.info("Batch {}: saved {} patterns (total: {})", batchNum, batchEntities.size(), built);
+                    log.info("Batch {}: saved {} patterns (total: {})", batchNum, batchEntities.size(), totalBuilt);
+                    batchEntities.clear();
                 }
 
-                // Clear batch data and move cursor
+                // Clear batch-level data
                 batchCandles.clear();
-                batchEntities.clear();
-                System.gc();
+                batchCandles = null;
+                candleIndex.clear();
+                candleIndex = null;
+
+                // MEMORY FLUSH CHECKPOINT - every FLUSH_BATCH_INTERVAL batches
+                if (batchesSinceFlush >= FLUSH_BATCH_INTERVAL) {
+                    log.info("[MEMORY] Flush checkpoint reached at batch {} — clearing memory, continuing...", batchNum);
+
+                    // Ensure all collections are cleared
+                    batchEntities = null;
+
+                    // Force garbage collection at checkpoint
+                    System.gc();
+
+                    // Small pause to let GC complete
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+
+                    // Recreate collection for next checkpoint period
+                    batchEntities = new ArrayList<>(BATCH_SIZE);
+                    batchesSinceFlush = 0;
+
+                    log.info("[MEMORY] Memory cleared. Resuming from batch {}", batchNum + 1);
+                }
 
                 cursor = batchEndTime.plusMinutes(15);
             }
 
-            // Clear any remaining memory and force GC before loading cache
+            // Final cleanup
+            batchEntities = null;
             System.gc();
-            Thread.sleep(100); // Give GC time to run
 
-            // Now load last N days into memory cache
+            log.info("Pattern build complete: {} patterns saved to DB", totalBuilt);
+
+            // Load last N days into memory cache
+            log.info("Loading last {} days into memory cache...", cacheDays);
             loadPatternsFromDb();
 
             long duration = (System.currentTimeMillis() - startTime) / 1000;
-            log.info("Pattern dataset built: {} patterns saved to DB ({}s)", built, duration);
+            log.info("Pattern dataset built: {} patterns total ({}s)", totalBuilt, duration);
 
         } catch (Exception e) {
             log.error("Error building pattern dataset: {}", e.getMessage(), e);
@@ -705,7 +745,8 @@ public class PatternAnalyzer {
         }
 
         try {
-            log.info("Building patterns incrementally (batch mode)...");
+            log.info("Building patterns incrementally (memory-safe mode)...");
+            log.info("[MEMORY] Flush checkpoint every {} batches", FLUSH_BATCH_INTERVAL);
             long startTime = System.currentTimeMillis();
 
             // Find time boundaries
@@ -738,9 +779,16 @@ public class PatternAnalyzer {
 
             int built = 0;
             int batchNum = 0;
+            int batchesSinceFlush = 0;
+
+            // Reusable collections (will be cleared at checkpoints)
+            List<Candle15mEntity> batchCandles = null;
+            java.util.Map<LocalDateTime, Integer> candleIndex = null;
+            List<HistoricalPatternEntity> batchEntities = new ArrayList<>(BATCH_SIZE);
 
             while (cursor.isBefore(endTime) || cursor.isEqual(endTime)) {
                 batchNum++;
+                batchesSinceFlush++;
 
                 LocalDateTime batchEndTime = cursor.plusMinutes(BATCH_SIZE * 15L);
                 if (batchEndTime.isAfter(endTime)) {
@@ -751,20 +799,20 @@ public class PatternAnalyzer {
                 LocalDateTime fetchStart = cursor.minusMinutes(LOOKBACK_CANDLES * 15L);
                 LocalDateTime fetchEnd = batchEndTime.plusMinutes(FUTURE_CANDLES * 15L);
 
-                List<Candle15mEntity> batchCandles = candleRepository.findCandlesBetween(fetchStart, fetchEnd);
+                batchCandles = candleRepository.findCandlesBetween(fetchStart, fetchEnd);
 
                 if (batchCandles.size() < LOOKBACK_CANDLES + FUTURE_CANDLES + 1) {
+                    batchCandles.clear();
+                    batchCandles = null;
                     cursor = batchEndTime.plusMinutes(15);
                     continue;
                 }
 
                 // Build index for fast lookup
-                java.util.Map<LocalDateTime, Integer> candleIndex = new java.util.HashMap<>();
+                candleIndex = new java.util.HashMap<>(batchCandles.size());
                 for (int i = 0; i < batchCandles.size(); i++) {
                     candleIndex.put(batchCandles.get(i).getOpenTime(), i);
                 }
-
-                List<HistoricalPatternEntity> batchEntities = new ArrayList<>();
 
                 LocalDateTime processingTime = cursor;
                 while (!processingTime.isAfter(batchEndTime)) {
@@ -813,15 +861,45 @@ public class PatternAnalyzer {
                 if (!batchEntities.isEmpty()) {
                     patternRepository.saveAll(batchEntities);
                     log.info("Batch {}: saved {} patterns (total: {})", batchNum, batchEntities.size(), built);
+                    batchEntities.clear();
                 }
 
-                // Clear and move cursor
+                // Clear batch-level data
                 batchCandles.clear();
-                batchEntities.clear();
-                System.gc();
+                batchCandles = null;
+                candleIndex.clear();
+                candleIndex = null;
+
+                // MEMORY FLUSH CHECKPOINT - every FLUSH_BATCH_INTERVAL batches
+                if (batchesSinceFlush >= FLUSH_BATCH_INTERVAL) {
+                    log.info("[MEMORY] Flush checkpoint reached at batch {} — clearing memory, continuing...", batchNum);
+
+                    // Ensure all collections are cleared
+                    batchEntities = null;
+
+                    // Force garbage collection at checkpoint
+                    System.gc();
+
+                    // Small pause to let GC complete
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+
+                    // Recreate collection for next checkpoint period
+                    batchEntities = new ArrayList<>(BATCH_SIZE);
+                    batchesSinceFlush = 0;
+
+                    log.info("[MEMORY] Memory cleared. Resuming from batch {}", batchNum + 1);
+                }
 
                 cursor = batchEndTime.plusMinutes(15);
             }
+
+            // Final cleanup
+            batchEntities = null;
+            System.gc();
 
             // Reload cache
             loadPatternsFromDb();
