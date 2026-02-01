@@ -1,0 +1,1 @@
+timestamp,strategy_id,strategy_type,rsi,rsi_bucket,ema_trend,volume_bucket,current_price,base_probability,final_probability,strategy_weight,historical_factor,predicted_profit_pct,predicted_hours,matched_patterns,market_regime,actual_profit_pct,actual_vs_predicted,target_reached,is_successful,sent_to_telegram,snapshot_group_id
