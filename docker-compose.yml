@@ -2,18 +2,62 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:15-alpine
-    container_name: btc-collector-db
+    image: postgres:15
+    container_name: btc-postgres
     environment:
-      POSTGRES_DB: btc_collector
       POSTGRES_USER: btc_user
       POSTGRES_PASSWORD: btc_password
+      POSTGRES_DB: btc_collector
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - btc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btc_user -d btc_collector"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: btc-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@btc.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8081:80"
+    networks:
+      - btc-network
+    depends_on:
+      - postgres
+
+  btc-collector:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: btc-collector
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/btc_collector
+      SPRING_DATASOURCE_USERNAME: btc_user
+      SPRING_DATASOURCE_PASSWORD: btc_password
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_USERNAME: ${BOT_USERNAME}
+      ALERT_CHAT_ID: ${ALERT_CHAT_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - btc-network
     restart: unless-stopped
 
 volumes:
   postgres_data:
+
+networks:
+  btc-network:
