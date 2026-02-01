@@ -40,4 +40,16 @@ public interface Candle15mRepository extends JpaRepository<Candle15mEntity, Loca
      */
     @Query("SELECT c FROM Candle15mEntity c WHERE c.openTime >= :startTime AND c.openTime <= :endTime ORDER BY c.openTime ASC")
     List<Candle15mEntity> findCandlesBetween(@Param("startTime") LocalDateTime startTime, @Param("endTime") LocalDateTime endTime);
+
+    /**
+     * Find first N candles ordered by time (for batch processing).
+     */
+    @Query("SELECT c FROM Candle15mEntity c ORDER BY c.openTime ASC LIMIT :limit")
+    List<Candle15mEntity> findFirstNCandles(@Param("limit") int limit);
+
+    /**
+     * Find candles after a time with limit (for batch processing).
+     */
+    @Query("SELECT c FROM Candle15mEntity c WHERE c.openTime > :afterTime ORDER BY c.openTime ASC LIMIT :limit")
+    List<Candle15mEntity> findCandlesAfterLimit(@Param("afterTime") LocalDateTime afterTime, @Param("limit") int limit);
 }

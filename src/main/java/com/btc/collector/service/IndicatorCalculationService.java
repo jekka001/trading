@@ -70,7 +70,7 @@ public class IndicatorCalculationService {
 
     /**
      * Resume calculation from last indicator (no delete).
-     * All candles in DB are closed (Binance only returns closed candles).
+     * Processes in batches to avoid OutOfMemoryError.
      */
     public int resumeCalculation() {
         if (!calcInProgress.compareAndSet(false, true)) {
@@ -82,25 +82,57 @@ public class IndicatorCalculationService {
             log.info("Resuming indicator calculation...");
 
             Optional<LocalDateTime> lastIndicatorTime = indicatorRepository.findMaxOpenTime();
-            List<Candle15mEntity> candles;
+            BigDecimal prevEma50 = null;
+            BigDecimal prevEma200 = null;
 
             if (lastIndicatorTime.isPresent()) {
-                candles = candleRepository.findCandlesAfter(lastIndicatorTime.get());
                 log.info("Resuming from: {}", lastIndicatorTime.get());
+                Optional<Indicator15mEntity> lastIndicator = indicatorRepository.findById(lastIndicatorTime.get());
+                if (lastIndicator.isPresent()) {
+                    prevEma50 = lastIndicator.get().getEma50();
+                    prevEma200 = lastIndicator.get().getEma200();
+                }
             } else {
-                candles = candleRepository.findAllOrderByOpenTimeAsc();
                 log.info("No indicators found, starting from beginning");
             }
 
-            if (candles.isEmpty()) {
-                log.info("No candles to process");
-                return 0;
+            int totalCalculated = 0;
+            LocalDateTime lastProcessedTime = lastIndicatorTime.orElse(null);
+
+            while (true) {
+                List<Candle15mEntity> batch;
+                if (lastProcessedTime == null) {
+                    batch = candleRepository.findFirstNCandles(BATCH_SIZE);
+                } else {
+                    batch = candleRepository.findCandlesAfterLimit(lastProcessedTime, BATCH_SIZE);
+                }
+
+                if (batch.isEmpty()) {
+                    break;
+                }
+
+                int batchCalculated = doCalculateBatch(batch, prevEma50, prevEma200);
+                totalCalculated += batchCalculated;
+
+                lastProcessedTime = batch.get(batch.size() - 1).getOpenTime();
+
+                // Update prev EMAs for next batch
+                Optional<Indicator15mEntity> lastIndicator = indicatorRepository.findById(lastProcessedTime);
+                if (lastIndicator.isPresent()) {
+                    prevEma50 = lastIndicator.get().getEma50();
+                    prevEma200 = lastIndicator.get().getEma200();
+                }
+
+                if (batchCalculated > 0) {
+                    log.info("Batch complete. Total calculated: {}", totalCalculated);
+                }
+
+                batch.clear();
+                System.gc();
             }
 
-            log.info("Processing {} candles", candles.size());
-            int total = doCalculate(candles, lastIndicatorTime.orElse(null), true);
-            log.info("Resume completed. Calculated: {}", total);
-            return total;
+            log.info("Resume completed. Calculated: {}", totalCalculated);
+            return totalCalculated;
 
         } catch (Exception e) {
             log.error("Error during resume: {}", e.getMessage(), e);
@@ -112,6 +144,7 @@ public class IndicatorCalculationService {
 
     /**
      * Full recalculation - deletes all and starts from scratch.
+     * Processes in batches to avoid OutOfMemoryError.
      */
     public void recalculateAll() {
         if (!calcInProgress.compareAndSet(false, true)) {
@@ -125,21 +158,95 @@ public class IndicatorCalculationService {
             indicatorRepository.deleteAll();
             log.info("Cleared existing indicators");
 
-            List<Candle15mEntity> candles = candleRepository.findAllOrderByOpenTimeAsc();
-
-            if (candles.isEmpty()) {
+            long totalCandles = candleRepository.count();
+            if (totalCandles == 0) {
                 log.info("No candles in database");
                 return;
             }
 
-            int total = doCalculate(candles, null, true);
-            log.info("Recalculation completed. Total indicators: {}", total);
+            log.info("Processing {} candles in batches of {}", totalCandles, BATCH_SIZE);
+
+            int totalCalculated = 0;
+            LocalDateTime lastProcessedTime = null;
+            BigDecimal prevEma50 = null;
+            BigDecimal prevEma200 = null;
+
+            while (true) {
+                List<Candle15mEntity> batch;
+                if (lastProcessedTime == null) {
+                    batch = candleRepository.findFirstNCandles(BATCH_SIZE);
+                } else {
+                    batch = candleRepository.findCandlesAfterLimit(lastProcessedTime, BATCH_SIZE);
+                }
+
+                if (batch.isEmpty()) {
+                    break;
+                }
+
+                // Get previous EMAs from last indicator
+                if (prevEma50 == null && lastProcessedTime != null) {
+                    Optional<Indicator15mEntity> lastIndicator = indicatorRepository.findById(lastProcessedTime);
+                    if (lastIndicator.isPresent()) {
+                        prevEma50 = lastIndicator.get().getEma50();
+                        prevEma200 = lastIndicator.get().getEma200();
+                    }
+                }
+
+                int batchCalculated = doCalculateBatch(batch, prevEma50, prevEma200);
+                totalCalculated += batchCalculated;
+
+                lastProcessedTime = batch.get(batch.size() - 1).getOpenTime();
+
+                // Update prev EMAs for next batch
+                Optional<Indicator15mEntity> lastIndicator = indicatorRepository.findById(lastProcessedTime);
+                if (lastIndicator.isPresent()) {
+                    prevEma50 = lastIndicator.get().getEma50();
+                    prevEma200 = lastIndicator.get().getEma200();
+                }
+
+                log.info("Batch complete. Total calculated: {}", totalCalculated);
+
+                // Clear batch from memory
+                batch.clear();
+                System.gc();
+            }
+
+            log.info("Recalculation completed. Total indicators: {}", totalCalculated);
 
         } catch (Exception e) {
             log.error("Error during recalculation: {}", e.getMessage(), e);
         } finally {
             calcInProgress.set(false);
         }
+    }
+
+    private int doCalculateBatch(List<Candle15mEntity> candles, BigDecimal prevEma50, BigDecimal prevEma200) {
+        int calculated = 0;
+
+        for (Candle15mEntity candle : candles) {
+            List<Candle15mEntity> lookbackCandles = candleRepository.findLastNCandles(
+                    candle.getOpenTime(), LOOKBACK_PERIOD + 1);
+
+            if (lookbackCandles.size() < MIN_CANDLES_REQUIRED) {
+                continue;
+            }
+
+            Collections.reverse(lookbackCandles);
+
+            Indicator15mEntity indicator = buildIndicator(candle.getOpenTime(), lookbackCandles, prevEma50, prevEma200);
+
+            if (indicator != null) {
+                indicatorRepository.save(indicator);
+                prevEma50 = indicator.getEma50();
+                prevEma200 = indicator.getEma200();
+                calculated++;
+            }
+
+            // Clear lookback from memory
+            lookbackCandles.clear();
+        }
+
+        return calculated;
     }
 
     private int doCalculate(List<Candle15mEntity> candles, LocalDateTime lastIndicatorTime, boolean logProgress) {

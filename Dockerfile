@@ -22,4 +22,4 @@ COPY --from=builder /app/target/btc-market-collector-1.0.0.jar app.jar
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-Xms128m", "-Xmx384m", "-XX:+UseSerialGC", "-XX:MaxRAM=512m", "-jar", "app.jar"]

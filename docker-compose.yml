@@ -46,6 +46,7 @@ services:
       BOT_TOKEN: ${BOT_TOKEN}
       BOT_USERNAME: ${BOT_USERNAME}
       ALERT_CHAT_ID: ${ALERT_CHAT_ID:-}
+      JAVA_OPTS: "-Xms128m -Xmx384m -XX:+UseSerialGC -XX:MaxRAM=512m"
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,6 +55,10 @@ services:
     networks:
       - btc-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
 volumes:
   postgres_data:
