@@ -11,6 +11,7 @@ import com.btc.collector.analysis.StrategyTracker;
 import com.btc.collector.persistence.AlertHistoryEntity;
 import com.btc.collector.persistence.Indicator15mEntity;
 import com.btc.collector.service.CandleSyncService;
+import com.btc.collector.service.DatabaseClearService;
 import com.btc.collector.service.FullSyncService;
 import com.btc.collector.service.IndicatorCalculationService;
 import com.btc.collector.strategy.*;
@@ -59,6 +60,7 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final MLDatasetExporter mlExporter;
     private final StrategyMetricsService metricsService;
     private final StrategyRegistry strategyRegistry;
+    private final DatabaseClearService databaseClearService;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     @Value("${telegram.bot.token}")
@@ -85,7 +87,8 @@ public class TelegramBot extends TelegramLongPollingBot {
                        MarketRegimeDetector regimeDetector,
                        MLDatasetExporter mlExporter,
                        StrategyMetricsService metricsService,
-                       StrategyRegistry strategyRegistry) {
+                       StrategyRegistry strategyRegistry,
+                       DatabaseClearService databaseClearService) {
         this.candleSyncService = candleSyncService;
         this.indicatorService = indicatorService;
         this.patternAnalyzer = patternAnalyzer;
@@ -102,6 +105,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         this.mlExporter = mlExporter;
         this.metricsService = metricsService;
         this.strategyRegistry = strategyRegistry;
+        this.databaseClearService = databaseClearService;
     }
 
     @PostConstruct
@@ -175,6 +179,7 @@ public class TelegramBot extends TelegramLongPollingBot {
             case "/regime_history" -> handleRegimeHistory();
             case "/metrics" -> handleMetrics(args);
             case "/ml_export" -> handleMlExport(args);
+            case "/clear_db" -> handleClearDb();
             default -> handleUnknown();
         };
     }
@@ -209,6 +214,9 @@ public class TelegramBot extends TelegramLongPollingBot {
                 Pipeline:
                 /full_sync - Run full pipeline (sync+indicators+patterns)
                 /state - Show system state summary
+
+                Maintenance:
+                /clear_db - Clear ALL data (candles, indicators, patterns)
 
                 ML & Backtesting:
                 /backtest [strategyId] - Backtest strategy
@@ -281,6 +289,30 @@ public class TelegramBot extends TelegramLongPollingBot {
                 This may take a while (downloading years of data).
                 Use /status to monitor progress.
                 """;
+    }
+
+    private String handleClearDb() {
+        try {
+            DatabaseClearService.ClearResult result = databaseClearService.clearAllData();
+            return String.format("""
+                    Database cleared successfully!
+
+                    Deleted:
+                    - Candles: %,d
+                    - Indicators: %,d
+                    - Patterns: %,d
+                    - Total: %,d records
+
+                    Use /full_sync to reload data.
+                    """,
+                    result.candlesDeleted(),
+                    result.indicatorsDeleted(),
+                    result.patternsDeleted(),
+                    result.total());
+        } catch (Exception e) {
+            log.error("Error clearing database: {}", e.getMessage(), e);
+            return "Error clearing database: " + e.getMessage();
+        }
     }
 
     private String handleUnknown() {
