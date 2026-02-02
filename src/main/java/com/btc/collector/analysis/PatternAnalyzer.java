@@ -78,6 +78,14 @@ public class PatternAnalyzer {
     }
 
     /**
+     * Delete all patterns in a separate transaction.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void deleteAllPatternsTransactional() {
+        patternRepository.deleteAllPatterns();
+    }
+
+    /**
      * DB-DRIVEN PATTERN BUILD
      *
      * Processes one candle at a time:
@@ -104,9 +112,9 @@ public class PatternAnalyzer {
                 return;
             }
 
-            // Clear existing patterns
+            // Clear existing patterns (in its own transaction)
             log.info("Clearing existing patterns from database...");
-            patternRepository.deleteAllPatterns();
+            deleteAllPatternsTransactional();
 
             // Get time boundaries
             LocalDateTime minTime = candleRepository.findMinOpenTime().orElse(null);
@@ -376,17 +384,29 @@ public class PatternAnalyzer {
             LocalDateTime latestIndicator = latestIndicatorOpt.get();
 
             Optional<LocalDateTime> latestPatternOpt = patternRepository.findMaxCandleTime();
-            LocalDateTime lastPatternTime = latestPatternOpt.orElse(LocalDateTime.MIN);
 
             log.info("Latest indicator: {}, Latest pattern: {}", latestIndicator, latestPatternOpt.orElse(null));
 
-            if (!lastPatternTime.isBefore(latestIndicator)) {
-                return new ResumeResult(true, 0, 0, System.currentTimeMillis() - startTimeMs, "Already up to date");
+            // Determine starting cursor
+            LocalDateTime cursor;
+            if (latestPatternOpt.isPresent()) {
+                LocalDateTime lastPatternTime = latestPatternOpt.get();
+                if (!lastPatternTime.isBefore(latestIndicator)) {
+                    return new ResumeResult(true, 0, 0, System.currentTimeMillis() - startTimeMs, "Already up to date");
+                }
+                cursor = lastPatternTime.plusMinutes(15);
+            } else {
+                // No patterns exist - start from earliest candle + LOOKBACK
+                Optional<LocalDateTime> minCandleOpt = candleRepository.findMinOpenTime();
+                if (minCandleOpt.isEmpty()) {
+                    return new ResumeResult(false, 0, 0, 0, "No candles in database");
+                }
+                cursor = minCandleOpt.get().plusMinutes(LOOKBACK_CANDLES * 15L);
+                log.info("No patterns exist, starting from: {}", cursor);
             }
 
             int built = 0;
             int skipped = 0;
-            LocalDateTime cursor = lastPatternTime.plusMinutes(15);
 
             while (!cursor.isAfter(latestIndicator)) {
                 try {
