@@ -11,7 +11,9 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -63,6 +65,11 @@ public class PatternAnalyzer {
     @PersistenceContext
     private EntityManager entityManager;
 
+    // Self-injection for calling transactional methods through proxy
+    @Autowired
+    @Lazy
+    private PatternAnalyzer self;
+
     @Value("${pattern.cache.days:30}")
     private int cacheDays;
 
@@ -112,9 +119,9 @@ public class PatternAnalyzer {
                 return;
             }
 
-            // Clear existing patterns (in its own transaction)
+            // Clear existing patterns (in its own transaction via proxy)
             log.info("Clearing existing patterns from database...");
-            deleteAllPatternsTransactional();
+            self.deleteAllPatternsTransactional();
 
             // Get time boundaries
             LocalDateTime minTime = candleRepository.findMinOpenTime().orElse(null);
@@ -143,7 +150,7 @@ public class PatternAnalyzer {
             // Process ONE candle at a time
             while (!cursor.isAfter(endTime)) {
                 try {
-                    boolean success = processSinglePattern(cursor);
+                    boolean success = self.processSinglePattern(cursor);
                     if (success) {
                         built++;
                     } else {
@@ -334,7 +341,7 @@ public class PatternAnalyzer {
 
             while (!cursor.isAfter(endTime)) {
                 try {
-                    boolean success = processSinglePattern(cursor);
+                    boolean success = self.processSinglePattern(cursor);
                     if (success) {
                         built++;
                     } else {
@@ -410,7 +417,7 @@ public class PatternAnalyzer {
 
             while (!cursor.isAfter(latestIndicator)) {
                 try {
-                    boolean success = processSinglePatternUnevaluated(cursor);
+                    boolean success = self.processSinglePatternUnevaluated(cursor);
                     if (success) {
                         built++;
                     } else {
@@ -509,7 +516,7 @@ public class PatternAnalyzer {
         int evaluated = 0;
         for (HistoricalPatternEntity pattern : unevaluated) {
             try {
-                boolean success = evaluateSinglePattern(pattern.getCandleTime());
+                boolean success = self.evaluateSinglePattern(pattern.getCandleTime());
                 if (success) {
                     evaluated++;
                 }
@@ -609,7 +616,7 @@ public class PatternAnalyzer {
                 return;
             }
 
-            boolean success = processSinglePattern(targetTime);
+            boolean success = self.processSinglePattern(targetTime);
             if (success) {
                 // Reload just this pattern into cache
                 Optional<HistoricalPatternEntity> entityOpt = patternRepository.findByCandleTime(targetTime);
