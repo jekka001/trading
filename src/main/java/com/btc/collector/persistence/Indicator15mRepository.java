@@ -1,6 +1,7 @@
 package com.btc.collector.persistence;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -48,4 +49,11 @@ public interface Indicator15mRepository extends JpaRepository<Indicator15mEntity
      */
     @Query("SELECT i FROM Indicator15mEntity i WHERE i.openTime >= :sinceTime ORDER BY i.openTime ASC")
     List<Indicator15mEntity> findIndicatorsSince(@Param("sinceTime") LocalDateTime sinceTime);
+
+    /**
+     * Bulk delete all indicators without loading into memory.
+     */
+    @Modifying
+    @Query("DELETE FROM Indicator15mEntity")
+    void deleteAllIndicators();
 }

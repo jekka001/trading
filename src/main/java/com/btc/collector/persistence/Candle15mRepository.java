@@ -1,6 +1,7 @@
 package com.btc.collector.persistence;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -40,4 +41,11 @@ public interface Candle15mRepository extends JpaRepository<Candle15mEntity, Loca
      */
     @Query("SELECT c FROM Candle15mEntity c WHERE c.openTime >= :startTime AND c.openTime <= :endTime ORDER BY c.openTime ASC")
     List<Candle15mEntity> findCandlesBetween(@Param("startTime") LocalDateTime startTime, @Param("endTime") LocalDateTime endTime);
+
+    /**
+     * Bulk delete all candles without loading into memory.
+     */
+    @Modifying
+    @Query("DELETE FROM Candle15mEntity")
+    void deleteAllCandles();
 }

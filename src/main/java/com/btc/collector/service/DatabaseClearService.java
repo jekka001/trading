@@ -69,12 +69,14 @@ public class DatabaseClearService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void deleteAllIndicatorsInTransaction() {
-        indicatorRepository.deleteAll();
+        // Use bulk delete query - does NOT load entities into memory
+        indicatorRepository.deleteAllIndicators();
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void deleteAllCandlesInTransaction() {
-        candleRepository.deleteAll();
+        // Use bulk delete query - does NOT load entities into memory
+        candleRepository.deleteAllCandles();
     }
 
     /**
