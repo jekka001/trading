@@ -30,21 +30,21 @@ public interface AlertHistoryRepository extends JpaRepository<AlertHistoryEntity
     List<AlertHistoryEntity> findByStrategyId(@Param("strategyId") String strategyId);
 
     /**
-     * Count unevaluated alerts.
+     * Count unevaluated alerts (excluding zero probability).
      */
-    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.evaluated = false")
+    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.evaluated = false AND (a.finalProbability IS NULL OR a.finalProbability > 0)")
     long countPendingEvaluations();
 
     /**
-     * Count successful alerts.
+     * Count successful alerts (excluding zero probability).
      */
-    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.evaluated = true AND a.success = true")
+    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.evaluated = true AND a.success = true AND (a.finalProbability IS NULL OR a.finalProbability > 0)")
     long countSuccessful();
 
     /**
-     * Count failed alerts.
+     * Count failed alerts (excluding zero probability).
      */
-    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.evaluated = true AND a.success = false")
+    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.evaluated = true AND a.success = false AND (a.finalProbability IS NULL OR a.finalProbability > 0)")
     long countFailed();
 
     /**
@@ -54,15 +54,15 @@ public interface AlertHistoryRepository extends JpaRepository<AlertHistoryEntity
     List<AlertHistoryEntity> findAlertsBetween(@Param("startTime") LocalDateTime startTime, @Param("endTime") LocalDateTime endTime);
 
     /**
-     * Get overall success rate.
+     * Get overall success rate (excluding zero probability).
      */
-    @Query("SELECT COALESCE(AVG(CASE WHEN a.success = true THEN 1.0 ELSE 0.0 END) * 100, 0) FROM AlertHistoryEntity a WHERE a.evaluated = true")
+    @Query("SELECT COALESCE(AVG(CASE WHEN a.success = true THEN 1.0 ELSE 0.0 END) * 100, 0) FROM AlertHistoryEntity a WHERE a.evaluated = true AND (a.finalProbability IS NULL OR a.finalProbability > 0)")
     Double getOverallSuccessRate();
 
     /**
-     * Count total signals.
+     * Count total signals (excluding zero probability for statistics).
      */
-    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a")
+    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.finalProbability IS NULL OR a.finalProbability > 0")
     long countTotal();
 
     /**
@@ -70,6 +70,12 @@ public interface AlertHistoryRepository extends JpaRepository<AlertHistoryEntity
      */
     @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.sentToTelegram = true")
     long countSentToTelegram();
+
+    /**
+     * Count signals with zero probability (ignored).
+     */
+    @Query("SELECT COUNT(a) FROM AlertHistoryEntity a WHERE a.finalProbability = 0")
+    long countIgnoredZeroProb();
 
     /**
      * Find alerts by snapshot group ID.

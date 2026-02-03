@@ -86,9 +86,11 @@ public class AlertEvaluationService {
 
             alertHistoryRepository.save(alert);
 
-            // Update strategy statistics (ALL signals contribute to learning)
+            // Update strategy statistics (skip zero probability - not eligible)
             String strategyId = alert.getStrategyId();
-            if (strategyId != null) {
+            BigDecimal finalProb = alert.getFinalProbability();
+            boolean isZeroProb = finalProb != null && finalProb.compareTo(BigDecimal.ZERO) == 0;
+            if (strategyId != null && !isZeroProb) {
                 if (success) {
                     strategyTracker.recordSuccess(strategyId);
                 } else {
@@ -131,5 +133,9 @@ public class AlertEvaluationService {
 
     public long getSentToTelegramCount() {
         return alertHistoryRepository.countSentToTelegram();
+    }
+
+    public long getIgnoredZeroProbCount() {
+        return alertHistoryRepository.countIgnoredZeroProb();
     }
 }

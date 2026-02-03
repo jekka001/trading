@@ -26,6 +26,7 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 
+import java.math.BigDecimal;
 import java.text.NumberFormat;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -585,10 +586,13 @@ public class TelegramBot extends TelegramLongPollingBot {
         long pending = alertEvaluationService.getPendingEvaluationCount();
         Double successRate = alertEvaluationService.getOverallSuccessRate();
 
+        long ignoredZeroProb = alertEvaluationService.getIgnoredZeroProbCount();
+
         sb.append("Signals:\n");
         sb.append("  Total: ").append(total).append("\n");
         sb.append("  Sent to Telegram: ").append(sentToTelegram).append("\n");
         sb.append("  Not sent (low prob): ").append(total - sentToTelegram).append("\n");
+        sb.append("  Ignored (0% prob): ").append(ignoredZeroProb).append("\n");
 
         sb.append("\nEvaluation:\n");
         sb.append("  Successful: ").append(successful).append("\n");
@@ -607,7 +611,9 @@ public class TelegramBot extends TelegramLongPollingBot {
                 sb.append(alert.getAlertTime().format(DATE_FORMAT));
                 sb.append(alert.isSentToTelegram() ? " 📤" : " 📝").append("\n");
                 sb.append("  Strategy: ").append(alert.getStrategyId()).append("\n");
-                sb.append("  Prob: ").append(alert.getFinalProbability()).append("% | ");
+                BigDecimal prob = alert.getFinalProbability();
+                boolean isZeroProb = prob != null && prob.compareTo(BigDecimal.ZERO) == 0;
+                sb.append("  Prob: ").append(isZeroProb ? "N/A" : prob + "%").append(" | ");
                 sb.append("Profit: +").append(alert.getPredictedProfitPct()).append("%\n");
                 if (alert.isEvaluated()) {
                     String status = alert.getSuccess() != null && alert.getSuccess() ? "✅" : "❌";
