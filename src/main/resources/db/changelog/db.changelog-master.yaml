@@ -2,3 +2,6 @@ databaseChangeLog:
   - include:
       file: changes/001-initial-schema.sql
       relativeToChangelogFile: true
+  - include:
+      file: changes/002-evaluation-v2-schema.sql
+      relativeToChangelogFile: true

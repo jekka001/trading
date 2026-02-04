@@ -87,6 +87,15 @@ public class AlertHistoryEntity {
     @Column(name = "sent_to_telegram")
     private boolean sentToTelegram;
 
+    @Column(name = "confidence_score")
+    private Integer confidenceScore;
+
+    @Column(name = "confidence_evaluated")
+    private boolean confidenceEvaluated;
+
+    @Column(name = "actual_profit_usd", precision = 10, scale = 4)
+    private BigDecimal actualProfitUsd;
+
     /**
      * Check if the alert achieved the target.
      */

@@ -30,6 +30,18 @@ public class StrategyStats {
     private LocalDateTime lastUpdated;
     private boolean degradationAlerted;
 
+    // Rate2.0 / Confidence evaluation fields
+    private int confidencePositive;
+    private int confidenceNegative;
+    private int confidenceNeutral;
+    private int confidenceScore;
+    private BigDecimal rate2;
+
+    // Profit evaluation fields
+    private BigDecimal totalPnlUsd;
+    private int profitTradesCount;
+    private BigDecimal avgProfitPct;
+
     public static StrategyStats createNew(String strategyId) {
         return StrategyStats.builder()
                 .strategyId(strategyId)
@@ -89,5 +101,13 @@ public class StrategyStats {
 
     public void markDegradationAlerted() {
         degradationAlerted = true;
+    }
+
+    /**
+     * Get total number of alerts evaluated for confidence (Rate2.0).
+     * Only counts positive and negative (neutral is excluded from rate calculation).
+     */
+    public int getConfidenceEvaluated() {
+        return confidencePositive + confidenceNegative;
     }
 }

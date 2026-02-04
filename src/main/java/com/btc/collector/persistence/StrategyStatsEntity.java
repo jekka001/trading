@@ -54,6 +54,32 @@ public class StrategyStatsEntity {
     @Column(name = "last_updated")
     private LocalDateTime lastUpdated;
 
+    // Rate2.0 / Confidence evaluation fields
+    @Column(name = "confidence_positive")
+    private int confidencePositive;
+
+    @Column(name = "confidence_negative")
+    private int confidenceNegative;
+
+    @Column(name = "confidence_neutral")
+    private int confidenceNeutral;
+
+    @Column(name = "confidence_score")
+    private int confidenceScore;
+
+    @Column(name = "rate2", precision = 5, scale = 2)
+    private BigDecimal rate2;
+
+    // Profit evaluation fields
+    @Column(name = "total_pnl_usd", precision = 12, scale = 4)
+    private BigDecimal totalPnlUsd;
+
+    @Column(name = "profit_trades_count")
+    private int profitTradesCount;
+
+    @Column(name = "sum_profit_pct", precision = 12, scale = 4)
+    private BigDecimal sumProfitPct;
+
     public static StrategyStatsEntity createNew(String strategyName) {
         return StrategyStatsEntity.builder()
                 .strategyName(strategyName)
@@ -108,5 +134,64 @@ public class StrategyStatsEntity {
 
     public boolean needsDegradationAlert() {
         return isDegraded() && !degradationAlerted;
+    }
+
+    /**
+     * Record a confidence score from Rate2.0 evaluation.
+     * @param score +1 (positive), 0 (neutral), -1 (negative)
+     */
+    public void recordConfidenceScore(int score) {
+        if (score > 0) {
+            confidencePositive++;
+            confidenceScore++;
+        } else if (score < 0) {
+            confidenceNegative++;
+            confidenceScore--;
+        } else {
+            confidenceNeutral++;
+        }
+        recalculateRate2();
+        lastUpdated = LocalDateTime.now();
+    }
+
+    private void recalculateRate2() {
+        int evaluated = confidencePositive + confidenceNegative;
+        if (evaluated > 0) {
+            rate2 = BigDecimal.valueOf(confidencePositive)
+                    .divide(BigDecimal.valueOf(evaluated), MC)
+                    .multiply(BigDecimal.valueOf(100))
+                    .setScale(2, RoundingMode.HALF_UP);
+        } else {
+            rate2 = null;
+        }
+    }
+
+    /**
+     * Record profit from a trade evaluation.
+     * @param profitPct actual profit percentage (can be negative for losses)
+     * @param profitUsd actual profit in USD (can be negative for losses)
+     */
+    public void recordProfit(BigDecimal profitPct, BigDecimal profitUsd) {
+        profitTradesCount++;
+        if (totalPnlUsd == null) {
+            totalPnlUsd = BigDecimal.ZERO;
+        }
+        if (sumProfitPct == null) {
+            sumProfitPct = BigDecimal.ZERO;
+        }
+        totalPnlUsd = totalPnlUsd.add(profitUsd);
+        sumProfitPct = sumProfitPct.add(profitPct);
+        lastUpdated = LocalDateTime.now();
+    }
+
+    /**
+     * Get average profit percentage for this strategy.
+     */
+    public BigDecimal getAvgProfitPct() {
+        if (profitTradesCount == 0 || sumProfitPct == null) {
+            return null;
+        }
+        return sumProfitPct.divide(BigDecimal.valueOf(profitTradesCount), MC)
+                .setScale(2, RoundingMode.HALF_UP);
     }
 }

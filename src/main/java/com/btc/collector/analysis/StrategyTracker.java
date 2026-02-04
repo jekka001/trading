@@ -162,6 +162,16 @@ public class StrategyTracker {
                 .weight(entity.getWeight())
                 .lastUpdated(entity.getLastUpdated())
                 .degradationAlerted(entity.isDegradationAlerted())
+                // Rate2.0 fields
+                .confidencePositive(entity.getConfidencePositive())
+                .confidenceNegative(entity.getConfidenceNegative())
+                .confidenceNeutral(entity.getConfidenceNeutral())
+                .confidenceScore(entity.getConfidenceScore())
+                .rate2(entity.getRate2())
+                // Profit fields
+                .totalPnlUsd(entity.getTotalPnlUsd())
+                .profitTradesCount(entity.getProfitTradesCount())
+                .avgProfitPct(entity.getAvgProfitPct())
                 .build();
     }
 }

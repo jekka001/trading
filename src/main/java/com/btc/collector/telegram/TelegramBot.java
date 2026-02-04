@@ -1,13 +1,17 @@
 package com.btc.collector.telegram;
 
 import com.btc.collector.analysis.AlertEvaluationService;
+import com.btc.collector.analysis.ConfidenceEvaluationService;
 import com.btc.collector.analysis.IndicatorLookupService;
 import com.btc.collector.analysis.PatternAnalyzer;
 import com.btc.collector.analysis.PredictionEvaluationService;
+import com.btc.collector.analysis.ProfitEvaluationService;
 import com.btc.collector.analysis.SignalAlertService;
 import com.btc.collector.analysis.StrategyEvaluator;
 import com.btc.collector.analysis.StrategyStats;
 import com.btc.collector.analysis.StrategyTracker;
+import com.btc.collector.analysis.TelegramStatsService;
+import com.btc.collector.analysis.TelegramStrategyStats;
 import com.btc.collector.persistence.AlertHistoryEntity;
 import com.btc.collector.persistence.Indicator15mEntity;
 import com.btc.collector.service.CandleSyncService;
@@ -54,6 +58,9 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final StrategyEvaluator strategyEvaluator;
     private final IndicatorLookupService indicatorLookupService;
     private final AlertEvaluationService alertEvaluationService;
+    private final ConfidenceEvaluationService confidenceEvaluationService;
+    private final ProfitEvaluationService profitEvaluationService;
+    private final TelegramStatsService telegramStatsService;
     private final FullSyncService fullSyncService;
     private final BacktestService backtestService;
     private final StrategyRankingEngine rankingEngine;
@@ -82,6 +89,9 @@ public class TelegramBot extends TelegramLongPollingBot {
                        StrategyEvaluator strategyEvaluator,
                        IndicatorLookupService indicatorLookupService,
                        AlertEvaluationService alertEvaluationService,
+                       ConfidenceEvaluationService confidenceEvaluationService,
+                       ProfitEvaluationService profitEvaluationService,
+                       TelegramStatsService telegramStatsService,
                        FullSyncService fullSyncService,
                        BacktestService backtestService,
                        StrategyRankingEngine rankingEngine,
@@ -99,6 +109,9 @@ public class TelegramBot extends TelegramLongPollingBot {
         this.strategyEvaluator = strategyEvaluator;
         this.indicatorLookupService = indicatorLookupService;
         this.alertEvaluationService = alertEvaluationService;
+        this.confidenceEvaluationService = confidenceEvaluationService;
+        this.profitEvaluationService = profitEvaluationService;
+        this.telegramStatsService = telegramStatsService;
         this.fullSyncService = fullSyncService;
         this.backtestService = backtestService;
         this.rankingEngine = rankingEngine;
@@ -181,6 +194,7 @@ public class TelegramBot extends TelegramLongPollingBot {
             case "/metrics" -> handleMetrics(args);
             case "/ml_export" -> handleMlExport(args);
             case "/clear_db" -> handleClearDb();
+            case "/telegram_stats" -> handleTelegramStats();
             default -> handleUnknown();
         };
     }
@@ -211,6 +225,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                 /predictions - Show pending predictions
                 /eval_status - Show evaluation system status
                 /alerts - Show alert history and stats
+                /telegram_stats - Telegram-only statistics
 
                 Pipeline:
                 /full_sync - Run full pipeline (sync+indicators+patterns)
@@ -314,6 +329,91 @@ public class TelegramBot extends TelegramLongPollingBot {
             log.error("Error clearing database: {}", e.getMessage(), e);
             return "Error clearing database: " + e.getMessage();
         }
+    }
+
+    private String handleTelegramStats() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Telegram Alerts Statistics\n");
+        sb.append("(Only signals sent to Telegram)\n\n");
+
+        // Telegram Evaluation v1 (Success/Failure)
+        long signalsSent = alertEvaluationService.getSentToTelegramCount();
+        long successful = telegramStatsService.getSuccessfulCount();
+        long failed = telegramStatsService.getFailedCount();
+        Double successRate = telegramStatsService.getSuccessRate();
+
+        sb.append("Telegram Alerts Evaluation:\n");
+        sb.append("  Signals sent: ").append(signalsSent).append("\n");
+        sb.append("  Successful: ").append(successful).append("\n");
+        sb.append("  Failed: ").append(failed).append("\n");
+        if (successRate != null && (successful + failed) > 0) {
+            sb.append("  Success rate: ").append(String.format("%.1f", successRate)).append("%\n");
+        }
+
+        // Telegram Confidence Evaluation v2
+        long confScore = telegramStatsService.getTotalConfidenceScore();
+        long confEvaluated = telegramStatsService.getConfidenceEvaluatedCount();
+        Double confRate = telegramStatsService.getConfidenceRate();
+
+        sb.append("\nTelegram Confidence Evaluation:\n");
+        sb.append("  Score: ").append(confScore >= 0 ? "+" : "").append(confScore).append("\n");
+        sb.append("  Evaluated alerts: ").append(confEvaluated).append("\n");
+        if (confRate != null) {
+            sb.append("  Confidence rate: ").append(String.format("%.1f", confRate)).append("%\n");
+        }
+
+        // Telegram Profit Evaluation
+        BigDecimal avgProfitPct = telegramStatsService.getAvgActualProfitPct();
+        BigDecimal avgProfitUsd = telegramStatsService.getAvgActualProfitUsd();
+        BigDecimal totalPnlUsd = telegramStatsService.getTotalPnlUsd();
+        long profitEvaluated = telegramStatsService.getProfitEvaluatedCount();
+
+        sb.append("\nTelegram Profit Evaluation:\n");
+        if (avgProfitPct != null) {
+            sb.append("  Avg actual profit: ").append(avgProfitPct.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                    .append(avgProfitPct).append("%\n");
+        }
+        if (avgProfitUsd != null) {
+            sb.append("  Avg actual profit USD: ").append(avgProfitUsd.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                    .append(avgProfitUsd).append("$\n");
+        }
+        sb.append("  Total PnL USD: ").append(totalPnlUsd.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                .append(totalPnlUsd).append("$\n");
+        sb.append("  Trades evaluated: ").append(profitEvaluated).append("\n");
+
+        // Telegram Strategy Stats
+        var strategyStats = telegramStatsService.getStrategyStats();
+        if (!strategyStats.isEmpty()) {
+            sb.append("\nTelegram Strategy Stats\n");
+            for (TelegramStrategyStats stats : strategyStats) {
+                sb.append("\n").append(stats.getStrategyId()).append("\n");
+                sb.append("  Signals sent: ").append(stats.getSignalsSent()).append("\n");
+                if (stats.getSuccessRate() != null) {
+                    sb.append("  Rate: ").append(stats.getSuccessRate()).append("%");
+                    if (stats.getRate2() != null) {
+                        sb.append(" | Rate2.0: ").append(stats.getRate2()).append("%");
+                    }
+                    sb.append("\n");
+                }
+                if (stats.getAvgProfitPct() != null || stats.getTotalPnlUsd() != null) {
+                    sb.append("  Avg profit: ");
+                    if (stats.getAvgProfitPct() != null) {
+                        sb.append(stats.getAvgProfitPct().compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                                .append(stats.getAvgProfitPct()).append("%");
+                    }
+                    if (stats.getTotalPnlUsd() != null) {
+                        sb.append(" | Total PnL: ")
+                                .append(stats.getTotalPnlUsd().compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                                .append(stats.getTotalPnlUsd()).append("$");
+                    }
+                    sb.append("\n");
+                }
+            }
+        } else {
+            sb.append("\nNo Telegram strategy stats available yet.");
+        }
+
+        return sb.toString();
     }
 
     private String handleUnknown() {
@@ -530,13 +630,30 @@ public class TelegramBot extends TelegramLongPollingBot {
 
         for (StrategyStats stats : strategies) {
             sb.append(stats.getStrategyId()).append("\n");
-            sb.append("  Rate: ").append(stats.getSuccessRate()).append("% | ");
-            sb.append("Weight: ").append(stats.getWeight()).append("\n");
-            sb.append("  Total: ").append(stats.getTotalPredictions());
+            sb.append("  Rate: ").append(stats.getSuccessRate()).append("%");
+            if (stats.getRate2() != null) {
+                sb.append(" | Rate2.0: ").append(stats.getRate2()).append("%");
+            }
+            sb.append(" | Weight: ").append(stats.getWeight()).append("\n");
+            // Profit metrics
+            if (stats.getProfitTradesCount() > 0) {
+                BigDecimal avgProfit = stats.getAvgProfitPct();
+                BigDecimal totalPnl = stats.getTotalPnlUsd();
+                sb.append("  Avg profit: ");
+                if (avgProfit != null) {
+                    sb.append(avgProfit.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "").append(avgProfit).append("%");
+                }
+                sb.append(" | Total PnL: ");
+                if (totalPnl != null) {
+                    sb.append(totalPnl.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "").append(totalPnl).append("$");
+                }
+                sb.append("\n");
+            }
+            sb.append("  Trades: ").append(stats.getTotalPredictions());
             sb.append(" (").append(stats.getSuccessfulPredictions()).append("/");
             sb.append(stats.getFailedPredictions()).append(")\n");
             if (stats.isDegraded()) {
-                sb.append("  ⚠️ DEGRADED\n");
+                sb.append("  DEGRADED\n");
             }
             sb.append("\n");
         }
@@ -601,6 +718,37 @@ public class TelegramBot extends TelegramLongPollingBot {
         if (successRate != null) {
             sb.append("  Success rate: ").append(String.format("%.1f", successRate)).append("%\n");
         }
+
+        // Evaluation v2 (Confidence)
+        long confScore = confidenceEvaluationService.getTotalScore();
+        long confEvaluated = confidenceEvaluationService.getEvaluatedCount();
+        Double rate2 = confidenceEvaluationService.getGlobalRate2();
+
+        sb.append("\nEvaluation v2 (Confidence):\n");
+        sb.append("  Score: ").append(confScore >= 0 ? "+" : "").append(confScore).append("\n");
+        sb.append("  Evaluated: ").append(confEvaluated).append("\n");
+        if (rate2 != null) {
+            sb.append("  Confidence rate: ").append(String.format("%.1f", rate2)).append("%\n");
+        }
+
+        // Profit Evaluation
+        BigDecimal avgProfitPct = profitEvaluationService.getAvgActualProfitPct();
+        BigDecimal avgProfitUsd = profitEvaluationService.getAvgActualProfitUsd();
+        BigDecimal totalPnlUsd = profitEvaluationService.getTotalPnlUsd();
+        long profitEvaluated = profitEvaluationService.getEvaluatedCount();
+
+        sb.append("\nProfit Evaluation:\n");
+        if (avgProfitPct != null) {
+            sb.append("  Avg actual profit: ").append(avgProfitPct.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                    .append(avgProfitPct).append("%\n");
+        }
+        if (avgProfitUsd != null) {
+            sb.append("  Avg actual profit USD: ").append(avgProfitUsd.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                    .append(avgProfitUsd).append("$\n");
+        }
+        sb.append("  Total PnL USD: ").append(totalPnlUsd.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "")
+                .append(totalPnlUsd).append("$\n");
+        sb.append("  Trades evaluated: ").append(profitEvaluated).append("\n");
 
         // Recent signals
         var recentAlerts = alertEvaluationService.getRecentAlerts(5);
