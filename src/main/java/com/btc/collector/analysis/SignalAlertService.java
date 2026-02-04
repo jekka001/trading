@@ -116,11 +116,24 @@ public class SignalAlertService {
 
         log.info("Saved {} strategy alerts for snapshot {}", savedAlerts.size(), snapshotId);
 
-        // Check if any strategy qualifies for Telegram alert
-        if (!aggregated.hasQualifyingStrategy(minProbability, minProfit, minSamples)) {
-            log.debug("No strategy meets alert conditions. Saved for learning only.");
+        // Check if any strategy qualifies for Telegram alert (using boosted probability)
+        if (!aggregated.hasQualifyingTelegramStrategy(minProbability, minProfit, minSamples)) {
+            log.debug("No strategy meets Telegram alert conditions (after PnL boost). Saved for learning only.");
             return false;
         }
+
+        // Log qualifying strategies with PnL coefficient debug info
+        aggregated.getStrategyResults().stream()
+                .filter(StrategyAnalysisResult::hasData)
+                .filter(r -> r.meetsTelegramConditions(minProbability, minProfit, minSamples))
+                .forEach(r -> {
+                    log.info("Strategy qualifies for Telegram: strategy={}, totalPnl=${}, pnlCoeff={}, baseProb={}%, boostedProb={}%",
+                            r.getStrategyId(),
+                            r.getTotalPnl() != null ? r.getTotalPnl() : "N/A",
+                            r.getPnlCoefficient(),
+                            r.getFinalProbability(),
+                            r.getBoostedProbability());
+                });
 
         // Check cooldown
         if (!isCooldownPassed()) {
@@ -292,11 +305,15 @@ public class SignalAlertService {
             sb.append("Volume: ").append(formatSign(snapshot.getVolumeChangePct())).append("%\n\n");
         }
 
-        // Top strategies summary
+        // Top strategies summary (using boosted probability for Telegram filter)
         List<StrategyAnalysisResult> topStrategies = aggregated.getStrategyResults().stream()
                 .filter(StrategyAnalysisResult::hasData)
-                .filter(r -> r.meetsConditions(minProbability, minProfit, minSamples))
-                .sorted((a, b) -> b.getFinalProbability().compareTo(a.getFinalProbability()))
+                .filter(r -> r.meetsTelegramConditions(minProbability, minProfit, minSamples))
+                .sorted((a, b) -> {
+                    BigDecimal aProb = a.getBoostedProbability() != null ? a.getBoostedProbability() : a.getFinalProbability();
+                    BigDecimal bProb = b.getBoostedProbability() != null ? b.getBoostedProbability() : b.getFinalProbability();
+                    return bProb.compareTo(aProb);
+                })
                 .limit(3)
                 .toList();
 
@@ -304,8 +321,12 @@ public class SignalAlertService {
             sb.append("<b>🔍 Top Strategies:</b>\n");
             for (StrategyAnalysisResult s : topStrategies) {
                 sb.append("• <code>").append(s.getStrategyId()).append("</code>: ")
-                        .append(s.getFinalProbability()).append("% (")
-                        .append(s.getMatchedPatterns()).append(" patterns)\n");
+                        .append(s.getFinalProbability()).append("%");
+                // Show PnL boost if applied
+                if (s.hasPnlBoost()) {
+                    sb.append(" → ").append(s.getBoostedProbability()).append("% (PnL+)");
+                }
+                sb.append(" (").append(s.getMatchedPatterns()).append(" patterns)\n");
             }
         }
 

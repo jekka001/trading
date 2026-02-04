@@ -26,6 +26,7 @@ public class ProbabilityEngine {
     private final PatternAnalyzer patternAnalyzer;
     private final StrategyTracker strategyTracker;
     private final StrategyEvaluator strategyEvaluator;
+    private final PnlCoefficientService pnlCoefficientService;
 
     public ProbabilityResult analyze(MarketSnapshot currentSnapshot) {
         if (currentSnapshot == null) {
@@ -228,15 +229,34 @@ public class ProbabilityEngine {
         EvaluationResult evalResult = strategyEvaluator.evaluate(
                 probabilityUp, currentSnapshot, strategyId);
 
+        // Calculate PnL coefficient for Telegram boosting
+        PnlCoefficientService.CoefficientResult coeffResult =
+                pnlCoefficientService.calculateCoefficient(strategyId);
+
+        // Apply coefficient to get boosted probability (for Telegram decision only)
+        BigDecimal boostedProb = pnlCoefficientService.applyCoefficient(
+                evalResult.getFinalProbability(), coeffResult.getCoefficient());
+
+        // Log PnL boost if applied
+        if (coeffResult.isBoosted()) {
+            log.debug("PnL boost applied: strategy={}, pnl=${}, coeff={}, base={}%, boosted={}%",
+                    strategyId, coeffResult.getTotalPnl(), coeffResult.getCoefficient(),
+                    evalResult.getFinalProbability(), boostedProb);
+        }
+
         return StrategyAnalysisResult.builder()
                 .strategyId(strategyId)
                 .baseProbability(probabilityUp)
-                .finalProbability(evalResult.getFinalProbability())
+                .finalProbability(evalResult.getFinalProbability())  // Original (stored in DB)
                 .strategyWeight(evalResult.getStrategyWeight())
                 .historicalFactor(evalResult.getHistoricalFactor())
                 .avgProfitPct(avgProfit)
                 .avgHoursToMax(avgHours)
                 .matchedPatterns(matchedPatterns.size())
+                // PnL coefficient fields (for Telegram decision)
+                .pnlCoefficient(coeffResult.getCoefficient())
+                .boostedProbability(boostedProb)
+                .totalPnl(coeffResult.getTotalPnl())
                 .build();
     }
 

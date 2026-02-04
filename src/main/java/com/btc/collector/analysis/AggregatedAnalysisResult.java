@@ -113,10 +113,18 @@ public class AggregatedAnalysisResult {
     }
 
     /**
-     * Check if any strategy meets the signal conditions.
+     * Check if any strategy meets the signal conditions (using base probability).
      */
     public boolean hasQualifyingStrategy(BigDecimal minProbability, BigDecimal minProfit, int minSamples) {
         return strategyResults.stream()
                 .anyMatch(r -> r.meetsConditions(minProbability, minProfit, minSamples));
+    }
+
+    /**
+     * Check if any strategy meets Telegram alert conditions (using boosted probability).
+     */
+    public boolean hasQualifyingTelegramStrategy(BigDecimal minProbability, BigDecimal minProfit, int minSamples) {
+        return strategyResults.stream()
+                .anyMatch(r -> r.meetsTelegramConditions(minProbability, minProfit, minSamples));
     }
 }
